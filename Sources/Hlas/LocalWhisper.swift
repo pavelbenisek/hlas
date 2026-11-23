@@ -275,6 +275,11 @@ final class ModelDownloader: NSObject, ObservableObject, URLSessionDownloadDeleg
         task.resume()
     }
 
+    /// Cancels the in-flight download; the delegate resets state and clears the error.
+    func cancel() {
+        task?.cancel()
+    }
+
     nonisolated func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask,
                                 didWriteData: Int64, totalBytesWritten: Int64, totalBytesExpectedToWrite: Int64) {
         let p = Double(totalBytesWritten) / Double(max(1, totalBytesExpectedToWrite))
