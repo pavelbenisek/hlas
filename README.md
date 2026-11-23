@@ -43,7 +43,7 @@ tccutil reset Accessibility com.gedeon.hlas
 
 ## Three ways to transcribe
 
-- **Local (default, free):** whisper.cpp `large-v3-turbo` on your computer (Metal on Mac). One-time 547 MB download, works offline, audio never leaves your computer. The model loads when you dictate and unloads after 3 minutes idle.
+- **Local (default, free):** whisper.cpp `large-v3-turbo` on your computer (Metal on Mac). One-time 547 MB download, works offline, audio never leaves your computer. The model loads when you dictate and unloads after 3 minutes idle. Settings > Engine lets you pick another whisper.cpp model (large-v3, medium, small, or less quantized turbo), downloaded on demand.
 - **Hlas Cloud (35 € a year):** no keys, no model download, no word limit. 7 days free, no card. [Details on hlas.dev](https://hlas.dev/en/#pricing).
 - **Your own key:** Groq (~$0.04 per hour of audio), OpenAI, Soniox or Fish Audio. Keys stay in the macOS Keychain or Windows Credential Manager.
 

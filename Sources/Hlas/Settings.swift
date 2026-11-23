@@ -94,6 +94,10 @@ final class Settings: ObservableObject {
             }
         }
     }
+    /// whisper.cpp model for the Local engine. LocalWhisper reads the same key.
+    @Published var localModel: LocalWhisperModel {
+        didSet { d.set(localModel.rawValue, forKey: "localModel") }
+    }
     /// Seconds to keep the local model in RAM after last use. 0 = unload instantly.
     @Published var modelKeepAliveSeconds: Double {
         didSet { d.set(modelKeepAliveSeconds, forKey: "modelKeepAlive") }
@@ -167,6 +171,7 @@ final class Settings: ObservableObject {
         openaiAPIKey = Self.loadAPIKey(account: "openai", legacyKey: "openaiAPIKey", defaults: d)
         sonioxAPIKey = KeychainStore.string(for: "soniox") ?? ""
         fishAPIKey = KeychainStore.string(for: "fish") ?? ""
+        localModel = LocalWhisperModel(savedValue: d.string(forKey: "localModel"))
         modelKeepAliveSeconds = d.object(forKey: "modelKeepAlive") as? Double ?? 180
         vocabulary = d.stringArray(forKey: "vocabulary") ?? []
         favoriteLanguages = d.stringArray(forKey: "favoriteLanguages") ?? ["cs", "en"]

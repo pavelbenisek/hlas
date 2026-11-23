@@ -47,11 +47,14 @@ def main() -> int:
     block = halluc.split("patterns: [String] = [", 1)[1].split("]", 1)[0]
     patterns = re.findall(r'"([^"]+)"', block)
     priming = dict(re.findall(r'case "(\w+)": priming = "([^"]+)"', whisper))
-    sha = re.search(r'expectedSHA256 = "([0-9a-f]{64})"', whisper).group(1)
-    size = int(re.search(r"modelByteCount: Int64 = ([\d_]+)", whisper).group(1).replace("_", ""))
-    name = re.search(r'modelName = "([^"]+)"', whisper).group(1)
-    url = re.search(r'"(https://huggingface\.co/[^"]+\.bin)"', whisper.replace("\n", "").replace('"\n', "")) or \
-        re.search(r'(https://huggingface\.co/\S+?\.bin)', whisper)
+    # Windows ships the macOS default Local model; LocalModelCatalog.swift lists them all.
+    catalog = (mac / "Sources/HlasCore/LocalModelCatalog.swift").read_text()
+    default = re.search(r"static let `default`: LocalWhisperModel = \.(\w+)", catalog).group(1)
+    raw = re.search(rf'case {default} = "([^"]+)"', catalog).group(1)
+    size = int(re.search(rf"case \.{default}: return ([\d_]+)", catalog).group(1).replace("_", ""))
+    sha = re.search(rf'case \.{default}: return "([0-9a-f]{{64}})"', catalog).group(1)
+    name = f"ggml-{raw}.bin"
+    url = f"https://huggingface.co/ggerganov/whisper.cpp/resolve/main/{name}"
     groq_smart = re.search(r'model: "(openai/[^"]+)"', smart).group(1)
     openai_smart = re.search(r'model: "(gpt-[^"]+)"', smart).group(1)
 
@@ -62,7 +65,7 @@ def main() -> int:
         "priming_prompts": priming,
         "hallucination_patterns": patterns,
         "hallucination_ratio": 0.3,
-        "model": {"file": name, "url": url.group(1), "bytes": size, "sha256": sha},
+        "model": {"file": name, "url": url, "bytes": size, "sha256": sha},
     }
     text = json.dumps(data, ensure_ascii=False, indent=2) + "\n"
     if check:
