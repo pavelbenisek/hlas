@@ -39,6 +39,8 @@ struct SettingsView: View {
     @ObservedObject var history = History.shared
     @ObservedObject private var updater = Updater.shared
     @StateObject private var downloader = ModelDownloader()
+    /// Bumped when model files change on disk so the picker re-reads them.
+    @State private var modelListRevision = 0
     @State private var newWord = ""
     @State private var replaceFrom = ""
     @State private var replaceTo = ""
@@ -310,30 +312,55 @@ struct SettingsView: View {
             Text("Fast start · 10 min").tag(600.0)
         }
 
-        if LocalWhisper.modelExists {
+        Picker("Model", selection: $settings.localModel) {
+            ForEach(LocalWhisperModel.allCases, id: \.self) { model in
+                Text("\(model.title) · \(model.sizeLabel)\(LocalWhisper.isDownloaded(model) ? " ✓" : "")").tag(model)
+            }
+        }
+        .onChange(of: settings.localModel) {
+            // Free the old model now; the next dictation loads the new one.
+            LocalTranscriberHolder.shared.unload()
+            modelListRevision += 1
+        }
+        Text(settings.localModel.detail)
+            .font(.system(size: 11)).foregroundStyle(DS.fg3)
+
+        let selected = settings.localModel
+        let _ = modelListRevision
+        if LocalWhisper.isDownloaded(selected) {
             HStack(spacing: 6) {
                 Circle().fill(DS.brand).frame(width: 6, height: 6)
-                Text("large-v3-turbo (quantized, 547 MB) ready")
+                Text("\(selected.title), \(selected.sizeLabel) ready")
                     .font(.system(size: 11)).foregroundStyle(DS.fg2)
+            }
+            let unused = LocalWhisper.unusedDownloadedModels
+            if !unused.isEmpty {
+                let bytes = unused.reduce(Int64(0)) { $0 + $1.byteCount }
+                Button("Delete other downloaded models (\(ByteCountFormatter.string(fromByteCount: bytes, countStyle: .binary)))") {
+                    LocalWhisper.deleteUnusedModels()
+                    modelListRevision += 1
+                }
+                .buttonStyle(.borderless).foregroundStyle(DS.fg3).font(.system(size: 11))
             }
         } else if downloader.downloading {
             VStack(alignment: .leading, spacing: 6) {
                 ProgressView(value: downloader.progress).tint(DS.brand)
                     .accessibilityLabel("Downloading transcription model")
                     .accessibilityValue("\(Int(downloader.progress * 100)) percent")
-                Text("Downloading model… \(Int(downloader.progress * 100))%")
+                Text("Downloading \(downloader.model.title)… \(Int(downloader.progress * 100))%")
                     .font(.system(size: 11)).foregroundStyle(DS.fg3)
                 Button("Cancel", action: downloader.cancel)
                     .buttonStyle(.borderless).foregroundStyle(DS.fg3)
             }
         } else {
             VStack(alignment: .leading, spacing: 8) {
-                Text("Needs a one-time 547 MB model download.")
+                Text(LocalWhisper.activeModel.map { "Needs a one-time \(selected.sizeLabel) download. Dictation keeps using \($0.title) until then." }
+                     ?? "Needs a one-time \(selected.sizeLabel) model download.")
                     .font(.system(size: 11)).foregroundStyle(DS.fg3)
                 if let error = downloader.error {
                     Text(error).font(.system(size: 11)).foregroundStyle(DS.destructive)
                 }
-                Button("Download model") { downloader.start() }
+                Button("Download model") { downloader.start(selected) }
                     .buttonStyle(.borderedProminent).tint(DS.brand.opacity(0.9))
             }
         }

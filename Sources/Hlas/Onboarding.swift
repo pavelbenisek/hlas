@@ -511,7 +511,7 @@ struct OnboardingView: View {
                         .font(.caption)
                         .foregroundStyle(DS.destructive)
                 }
-                Button("Download model (547 MB)") { downloader.start() }
+                Button("Download model (\(LocalWhisper.selectedModel.sizeLabel))") { downloader.start() }
                     .buttonStyle(.borderedProminent)
                     .tint(DS.brand.opacity(0.9))
             }

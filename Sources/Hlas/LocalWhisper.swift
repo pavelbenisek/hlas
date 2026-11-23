@@ -17,15 +17,65 @@ final class LocalWhisper: Transcriber, @unchecked Sendable {
         return dir
     }()
 
-    static let modelName = "ggml-large-v3-turbo-q5_0.bin"
-    static let modelByteCount: Int64 = 574_041_195
+    /// The model picked in Settings (UserDefaults is thread-safe, so the
+    /// whisper queue can read it without hopping to the main actor).
+    static var selectedModel: LocalWhisperModel {
+        LocalWhisperModel(savedValue: UserDefaults.standard.string(forKey: "localModel"))
+    }
+
+    static func url(for model: LocalWhisperModel) -> URL { modelDir.appendingPathComponent(model.fileName) }
+
+    static func isDownloaded(_ model: LocalWhisperModel) -> Bool {
+        Int64((try? url(for: model).resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0) == model.byteCount
+    }
+
+    /// The model dictation actually uses: the selected one once it is on disk,
+    /// otherwise any downloaded model, so switching never breaks dictation
+    /// while the new model is still downloading.
+    static var activeModel: LocalWhisperModel? {
+        let selected = selectedModel
+        if isDownloaded(selected) { return selected }
+        return LocalWhisperModel.allCases.first(where: isDownloaded)
+    }
+
     /// HLAS_MODEL_PATH points tests at a model outside Application Support.
-    static var modelURL: URL {
-        ProcessInfo.processInfo.environment["HLAS_MODEL_PATH"].map { URL(fileURLWithPath: $0) }
-            ?? modelDir.appendingPathComponent(modelName)
+    private static var overridePath: String? { ProcessInfo.processInfo.environment["HLAS_MODEL_PATH"] }
+
+    static var modelURL: URL? {
+        if let overridePath { return URL(fileURLWithPath: overridePath) }
+        return activeModel.map(url(for:))
     }
     static var modelExists: Bool {
-        Int64((try? modelURL.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0) == modelByteCount
+        if let overridePath { return FileManager.default.fileExists(atPath: overridePath) }
+        return activeModel != nil
+    }
+
+    /// Downloaded models other than the selected one (empty until the selected one is on disk).
+    static var unusedDownloadedModels: [LocalWhisperModel] {
+        let selected = selectedModel
+        guard isDownloaded(selected) else { return [] }
+        return LocalWhisperModel.allCases.filter { $0 != selected && isDownloaded($0) }
+    }
+
+    static func deleteUnusedModels() {
+        for model in unusedDownloadedModels {
+            try? FileManager.default.removeItem(at: url(for: model))
+            Log.write("local model deleted: \(model.fileName)")
+        }
+    }
+
+    /// Path the current `ctx` was loaded from; a different path means the model changed.
+    private var loadedPath: String?
+
+    private func loadModelIfNeeded() {
+        guard let path = Self.modelURL?.path else { return }
+        if ctx != nil, loadedPath != path { freeModel() }
+        guard ctx == nil else { return }
+        var params = whisper_context_default_params()
+        params.use_gpu = true; params.flash_attn = true
+        ctx = whisper_init_from_file_with_params(path, params)
+        loadedPath = ctx == nil ? nil : path
+        Log.write("local model \(ctx == nil ? "failed to load" : "loaded"): \((path as NSString).lastPathComponent)")
     }
 
     func prepare(keepAlive: Double) {
@@ -34,12 +84,9 @@ final class LocalWhisper: Transcriber, @unchecked Sendable {
             unloadGeneration += 1
             monitorMemoryPressure()
             let began = ContinuousClock.now
-            if ctx == nil {
-                var params = whisper_context_default_params()
-                params.use_gpu = true; params.flash_attn = true
-                ctx = whisper_init_from_file_with_params(Self.modelURL.path, params)
-                Log.write("local prefetch: elapsed=\(began.duration(to: .now))")
-            }
+            let cold = ctx == nil || loadedPath != Self.modelURL?.path
+            loadModelIfNeeded()
+            if cold { Log.write("local prefetch: elapsed=\(began.duration(to: .now))") }
             scheduleUnload(after: keepAlive)
         }
     }
@@ -68,7 +115,7 @@ final class LocalWhisper: Transcriber, @unchecked Sendable {
                         try token.check()
                         monitorMemoryPressure()
                         let began = ContinuousClock.now
-                        let cold = ctx == nil
+                        let cold = ctx == nil || loadedPath != Self.modelURL?.path
                         let text = try run(samples: samples, language: language, prompt: prompt, priming: priming, token: token)
                         try token.check()
                         Log.write("local inference: cold=\(cold) elapsed=\(began.duration(to: .now))")
@@ -85,12 +132,7 @@ final class LocalWhisper: Transcriber, @unchecked Sendable {
 
     private func run(samples: [Float], language: String?, prompt: String?, priming usePriming: Bool,
                      token: CancellationToken) throws -> String {
-        if ctx == nil {
-            var cparams = whisper_context_default_params()
-            cparams.use_gpu = true
-            cparams.flash_attn = true
-            ctx = whisper_init_from_file_with_params(Self.modelURL.path, cparams)
-        }
+        loadModelIfNeeded()
         guard let ctx else {
             throw NSError(domain: "Hlas", code: 500, userInfo: [
                 NSLocalizedDescriptionKey: "Failed to load model"
@@ -181,6 +223,7 @@ final class LocalWhisper: Transcriber, @unchecked Sendable {
 
     private func freeModel() {
         unloadGeneration += 1
+        loadedPath = nil
         if let ctx { whisper_free(ctx); self.ctx = nil; Log.write("local model unloaded") }
     }
 
@@ -195,41 +238,41 @@ enum LocalTranscriberHolder {
     static let shared = LocalWhisper()
 }
 
-/// Downloads the quantized turbo model from Hugging Face with progress.
+/// Downloads a whisper.cpp model from Hugging Face with progress, verifies
+/// its size and SHA-256, then installs it next to the other models.
 @MainActor
 final class ModelDownloader: NSObject, ObservableObject, URLSessionDownloadDelegate {
     @Published var progress: Double = 0
     @Published var downloading = false
     @Published var error: String?
+    /// The model being downloaded, or the one that last failed.
+    @Published private(set) var model: LocalWhisperModel = LocalWhisper.selectedModel
 
-    static let remote = URL(string:
-        "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo-q5_0.bin")!
-    nonisolated private static let expectedByteCount = LocalWhisper.modelByteCount
-    nonisolated private static let expectedSHA256 = "394221709cd5ad1f40c46e6031ca61bce88931e6e088c188294c6d5a55ffa7e2"
-    nonisolated private static var stagingURL: URL {
-        LocalWhisper.modelDir.appendingPathComponent("\(LocalWhisper.modelName).download")
+    nonisolated private static func stagingURL(for model: LocalWhisperModel) -> URL {
+        LocalWhisper.modelDir.appendingPathComponent("\(model.fileName).download")
     }
 
     private var session: URLSession!
     private var task: URLSessionDownloadTask?
 
-    func start() {
+    /// Downloads the model picked in Settings.
+    func start() { start(LocalWhisper.selectedModel) }
+
+    func start(_ model: LocalWhisperModel) {
         guard !downloading else { return }
+        self.model = model
         downloading = true
         error = nil
         progress = 0
-        try? FileManager.default.removeItem(at: Self.stagingURL)
+        try? FileManager.default.removeItem(at: Self.stagingURL(for: model))
         let delegateQueue = OperationQueue()
         delegateQueue.qualityOfService = .userInitiated
         delegateQueue.maxConcurrentOperationCount = 1
         session = URLSession(configuration: .default, delegate: self, delegateQueue: delegateQueue)
-        let task = session.downloadTask(with: Self.remote)
+        let task = session.downloadTask(with: model.remoteURL)
+        task.taskDescription = model.rawValue
         self.task = task
         task.resume()
-    }
-
-    func cancel() {
-        task?.cancel()
     }
 
     nonisolated func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask,
@@ -245,23 +288,24 @@ final class ModelDownloader: NSObject, ObservableObject, URLSessionDownloadDeleg
                   (200..<300).contains(response.statusCode) else {
                 throw ModelDownloadError.invalidResponse
             }
+            let model = LocalWhisperModel(savedValue: downloadTask.taskDescription)
             let fileManager = FileManager.default
-            let staging = Self.stagingURL
+            let staging = Self.stagingURL(for: model)
             try? fileManager.removeItem(at: staging)
             try fileManager.moveItem(at: location, to: staging)
             try ModelFileValidator.validate(
                 staging,
-                expectedByteCount: Self.expectedByteCount,
-                expectedSHA256: Self.expectedSHA256
+                expectedByteCount: model.byteCount,
+                expectedSHA256: model.sha256
             )
-            try Self.install(staging, at: LocalWhisper.modelURL)
+            try Self.install(staging, at: LocalWhisper.url(for: model))
             Task { @MainActor in
                 self.downloading = false
                 self.progress = 1
                 self.task = nil
             }
         } catch {
-            try? FileManager.default.removeItem(at: Self.stagingURL)
+            try? FileManager.default.removeItem(at: Self.stagingURL(for: LocalWhisperModel(savedValue: downloadTask.taskDescription)))
             Task { @MainActor in
                 self.downloading = false
                 self.error = error.localizedDescription

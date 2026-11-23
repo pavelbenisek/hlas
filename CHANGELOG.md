@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Local engine model picker in Settings > Engine > Local: large-v3-turbo (quantized, default; q8; full), large-v3 (quantized; full), medium and small. Each model downloads on demand with its size shown and is verified by SHA-256. Dictation keeps using an already downloaded model until the new one finishes, and other downloaded models can be deleted from the same place.
 - New hotkey choice: Fn + Control. Hold both to dictate, release either to stop. Pick it in Settings or the welcome tour.
 
 ## 0.6.1 - 2026-11-16
